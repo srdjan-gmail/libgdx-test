@@ -3,22 +3,18 @@ package com.mygdx.game;
 import com.badlogic.gdx.ApplicationAdapter;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
-import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.GL20;
 import com.badlogic.gdx.graphics.OrthographicCamera;
-import com.badlogic.gdx.graphics.Texture;
 import com.badlogic.gdx.graphics.g2d.Sprite;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
-import com.badlogic.gdx.graphics.g2d.BitmapFont;
-import com.badlogic.gdx.graphics.g2d.GlyphLayout;
+import com.badlogic.gdx.math.MathUtils;
 import com.badlogic.gdx.math.Matrix4;
 import com.badlogic.gdx.math.Vector2;
 import com.badlogic.gdx.physics.box2d.*;
 
 public class MyGdxGame extends ApplicationAdapter {
     SpriteBatch batch;
-    BitmapFont font;
     ShapeRenderer shape;
     int x_text = 0;
     int x_dir_text = 1;
@@ -30,9 +26,6 @@ public class MyGdxGame extends ApplicationAdapter {
         rect_width = 16;
     }
 
-    final String text = "Dobar Dan";
-    GlyphLayout glyphLayout = new GlyphLayout();
-    Texture img;
     Sprite spriteWithPower;
     Sprite spriteNoPower;
     Sprite spriteActive;
@@ -41,12 +34,16 @@ public class MyGdxGame extends ApplicationAdapter {
     final int window_height_in_meters = 200;
     World world;
     Body body;
+    Body bodyLandingPlatform;
+    Body bodySurface;
     float pixels_per_meter;
+    boolean crashed = false;
 
     float force_x = 0.0f;
     float force_y = 0.0f;
     float torque = 0.0f;
     boolean landed = false;
+    int camera_delta_y = 0;
 
     Box2DDebugRenderer debugRenderer;
     Matrix4 debugMatrix;
@@ -55,11 +52,7 @@ public class MyGdxGame extends ApplicationAdapter {
     @Override
     public void create() {
         batch = new SpriteBatch();
-        font = new BitmapFont();
-        font.setColor(Color.YELLOW);
         shape = new ShapeRenderer();
-        glyphLayout.setText(font, text);
-        img = new Texture("test-sprite-fire.png");
 
         spriteWithPower = SpriteCreator.createSpriteWithPower();
         spriteNoPower = SpriteCreator.createSprite();
@@ -83,9 +76,10 @@ public class MyGdxGame extends ApplicationAdapter {
         // Now define the dimensions of the physics shape
         PolygonShape shape = new PolygonShape();
         // We are a box, so this makes sense, no?
-        // Basically set the physics polygon to a box with the same dimension as our sprite
+        // Basically set the physics polygon to a box with the same dimension as our sprite.
+        // Uses half-widths and half-heights as parameters
         shape.setAsBox(spriteActive.getWidth() / 2f / pixels_per_meter,
-                spriteActive.getHeight() / 2f /pixels_per_meter);
+                spriteActive.getHeight() / 2f / pixels_per_meter);
 
         // FixtureDef is a confusing expression for physical properties
         // Basically this is where you, in addition to defining the shape of the body
@@ -94,20 +88,107 @@ public class MyGdxGame extends ApplicationAdapter {
         FixtureDef fixtureDef = new FixtureDef();
         fixtureDef.shape = shape;
         fixtureDef.density = .1f;  // Adjust mass and body's reaction to force.
+        fixtureDef.restitution = 0.3f;  // How bouncy the body is (rubber vs rock)
+        fixtureDef.friction = .8f;
 
         body.createFixture(fixtureDef);
-
         shape.dispose();
+
+        float width_in_m = Gdx.graphics.getWidth() / pixels_per_meter;
+        float height_in_m = Gdx.graphics.getHeight() / pixels_per_meter - 50 / pixels_per_meter;
+
+        float platform_width_in_m = 20;
+        float platform_height_in_m = 10;
+        float platform_x_in_m = (width_in_m - platform_width_in_m) / 2f;
+
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // Create Body for landing pad.
+        BodyDef bodyDef2 = new BodyDef();
+        bodyDef2.type = BodyDef.BodyType.StaticBody;
+
+        bodyDef2.position.set(0, 0);
+        FixtureDef fixtureDef2 = new FixtureDef();
+        fixtureDef2.friction = .6f;
+
+        EdgeShape edgeShape = new EdgeShape();
+        edgeShape.set(platform_x_in_m, 5f, platform_x_in_m+platform_width_in_m, 5f);
+
+        fixtureDef2.shape = edgeShape;
+
+        bodyLandingPlatform = world.createBody(bodyDef2);
+        bodyLandingPlatform.createFixture(fixtureDef2);
+        edgeShape.dispose();
+
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // Create Body for planet surface.
+        BodyDef bodyDef3 = new BodyDef();
+        bodyDef3.type = BodyDef.BodyType.StaticBody;
+        bodyDef3.position.set(0, 0);
+        FixtureDef fixtureDef3 = new FixtureDef();
+        fixtureDef3.friction = .9f;
+
+        EdgeShape edgeShape2 = new EdgeShape();
+        // Line across whole screen (ground)
+        edgeShape2.set(0f, 2f, width_in_m, 2f);
+
+        fixtureDef3.shape = edgeShape2;
+
+        bodySurface = world.createBody(bodyDef3);
+        bodySurface.createFixture(fixtureDef3);
+        edgeShape2.dispose();
 
         // Create a Box2DDebugRenderer, this allows us to see the physics simulation controlling the scene
         debugRenderer = new Box2DDebugRenderer();
-        camera = new OrthographicCamera(Gdx.graphics.getWidth(),Gdx.graphics.
+        camera = new OrthographicCamera(Gdx.graphics.getWidth(), Gdx.graphics.
                 getHeight());
-        camera.translate(camera.viewportWidth/2,camera.viewportHeight/2);
+        camera.translate(camera.viewportWidth / 2, camera.viewportHeight / 2);
+
+        world.setContactListener(new ContactListener() {
+            @Override
+            public void beginContact(Contact contact) {
+                // Check to see if the collision is between the second sprite and the bottom of the screen
+                // If so apply a random amount of upward force to both objects... just because
+                if ((contact.getFixtureA().getBody() == bodyLandingPlatform &&
+                        contact.getFixtureB().getBody() == body)
+                        ||
+                        (contact.getFixtureA().getBody() == body &&
+                                contact.getFixtureB().getBody() == bodyLandingPlatform)) {
+
+                    body.applyForceToCenter(0, MathUtils.random(20, 50), true);
+                    Vector2 speed = body.getLinearVelocity();
+                    if (speed.y > 1f) {
+                        System.out.println("Crash!");
+                        crashed = true;
+                    }
+                    System.out.printf("Landed vel: %s angle: %s\n", speed.len2(), Math.toDegrees(body.getAngle()));
+                    System.out.printf("Camera moved %d\n", camera_delta_y);
+                }
+            }
+
+            @Override
+            public void endContact(Contact contact) {
+            }
+
+            @Override
+            public void preSolve(Contact contact, Manifold oldManifold) {
+            }
+
+            @Override
+            public void postSolve(Contact contact, ContactImpulse impulse) {
+            }
+        });
     }
 
     @Override
     public void render() {
+        float x_in_pixels = body.getPosition().x * pixels_per_meter - spriteActive.getWidth() / 2f;
+        float y_in_pixels = body.getPosition().y * pixels_per_meter - spriteActive.getHeight() / 2f;
+        if (y_in_pixels < Gdx.graphics.getHeight() - 400) {
+            if (camera.zoom > 0.5f) {
+                camera.zoom = .5f;
+                camera.translate(0, -170);
+            }
+        }
         camera.update();
         // Advance the world, by the amount of time that has elapsed since the last frame
         // Generally in a real game, don't do this in the render loop, as you are tying the physics
@@ -116,56 +197,42 @@ public class MyGdxGame extends ApplicationAdapter {
 
         // Apply torque to the physics body.  At start this is 0 and will do nothing.
         // Torque is applied per frame instead of just once
-        body.applyForceToCenter(force_x, force_y,true);
+        body.applyForceToCenter(force_x, force_y, true);
         body.applyTorque(torque, true);
 
-        float x_in_pixels = body.getPosition().x * pixels_per_meter - spriteActive.getWidth() / 2f;
-        float y_in_pixels = body.getPosition().y * pixels_per_meter - spriteActive.getHeight() / 2f;
-        if (y_in_pixels < 0) {
-            if (!landed) {
-                Vector2 speed = body.getLinearVelocity();
-                System.out.printf("Landed vel: %s angle: %s\n", speed.len2(), body.getAngle());
-            }
-            body.setAngularVelocity(0f);
-            body.setLinearVelocity(0f, 0f);
-            landed = true;
-        }
         spriteWithPower.setPosition(x_in_pixels, y_in_pixels);
         spriteNoPower.setPosition(x_in_pixels, y_in_pixels);
 
-        rotate_dir = 0;
         if (Gdx.input.isKeyPressed(Input.Keys.LEFT)) {
-            torque = 20f;
-            if (spriteActive.getRotation() > -30) {
-                rotate_dir = -1;
+            torque = 80f;
+            if (spriteActive.getRotation() > 30) {
+                torque = 0f;
+                body.setAngularVelocity(0f);
             }
         } else if (Gdx.input.isKeyPressed(Input.Keys.RIGHT)) {
-            torque = -20f;
-            if (spriteActive.getRotation() < 30) {
-                rotate_dir = 1;
+            torque = -80f;
+            if (spriteActive.getRotation() < -30) {
+                torque = 0f;
+                body.setAngularVelocity(0f);
             }
         } else {
-            rotate_dir = 0;
+            torque = 0f;
+            body.setAngularVelocity(0f);
         }
 
-        /*
-        if (rotate_dir != 0) {
-            spriteWithPower.rotate(rotate_dir);
-            spriteNoPower.rotate(rotate_dir);
-        }
-        */
-        spriteWithPower.setRotation((float)Math.toDegrees(body.getAngle()));
-        spriteNoPower.setRotation((float)Math.toDegrees(body.getAngle()));
+        spriteWithPower.setRotation((float) Math.toDegrees(body.getAngle()));
+        spriteNoPower.setRotation((float) Math.toDegrees(body.getAngle()));
 
         if (Gdx.input.isKeyPressed(Input.Keys.SPACE)) {
             final float force;
             force = 30f;
-            torque = 0f;
-            body.setAngularVelocity(0f);
             spriteActive = spriteWithPower;
             float angle = body.getAngle();
             force_y = (float) (Math.cos(angle) * force);
-            force_x = (float) (- Math.sin(angle) * force);
+            force_x = (float) (-Math.sin(angle) * force);
+        } else if (Gdx.input.isKeyPressed(Input.Keys.DOWN)) {
+            camera.translate(0, -1);
+            camera_delta_y -= 1;
         } else {
             force_y = 0f;
             spriteActive = spriteNoPower;
@@ -177,39 +244,19 @@ public class MyGdxGame extends ApplicationAdapter {
         Gdx.gl.glClearColor(1, 1, 1, 1);
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT);
 
-        // This moves the origin and hides the lander. Why?
         batch.setProjectionMatrix(camera.combined);
 
         // Scale down the sprite batches projection matrix to box2D size
         debugMatrix = batch.getProjectionMatrix().cpy().scale(pixels_per_meter, pixels_per_meter, 0);
         batch.begin();
-        font.draw(batch, text, x_text, 30);
-        batch.draw(img, 100, 100);
-
-
-        // spriteActive.setPosition(Gdx.graphics.getWidth() / 2.0f, Gdx.graphics.getHeight() / 2.0f);
         spriteActive.draw(batch);
         batch.end();
-
-        // FOr text sample:
-        if (x_text > Gdx.graphics.getWidth() - glyphLayout.width) {
-            x_dir_text = -1;
-        } else if (x_text < 0) {
-            x_dir_text = 1;
-        }
 
         if (x_shape > Gdx.graphics.getWidth() - rect_width) {
             x_dir_shape = -x_dir_shape;
         } else if (x_shape < 0) {
             x_dir_shape = -x_dir_shape;
         }
-
-        // shape.begin(ShapeRenderer.ShapeType.Filled);
-        // shape.circle(50, 50, 50);
-        shape.begin(ShapeRenderer.ShapeType.Filled);
-        shape.setColor(Color.GREEN);
-        shape.rect(x_shape, 50, rect_width, 16);
-        shape.end();
 
         // Now render the physics world using our scaled down matrix
         // Note, this is strictly optional and is, as the name suggests, just for debugging purposes
@@ -226,9 +273,7 @@ public class MyGdxGame extends ApplicationAdapter {
 
     @Override
     public void dispose() {
-        font.dispose();
         shape.dispose();
-        img.dispose();
         batch.dispose();
     }
 }
