@@ -3,8 +3,11 @@ package com.mygdx.game;
 import com.badlogic.gdx.ApplicationAdapter;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
+import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.GL20;
 import com.badlogic.gdx.graphics.OrthographicCamera;
+import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.GlyphLayout;
 import com.badlogic.gdx.graphics.g2d.Sprite;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
@@ -48,6 +51,7 @@ public class MyGdxGame extends ApplicationAdapter {
     Box2DDebugRenderer debugRenderer;
     Matrix4 debugMatrix;
     OrthographicCamera camera;
+    BitmapFont font;
 
     @Override
     public void create() {
@@ -139,6 +143,10 @@ public class MyGdxGame extends ApplicationAdapter {
 
         // Create a Box2DDebugRenderer, this allows us to see the physics simulation controlling the scene
         debugRenderer = new Box2DDebugRenderer();
+
+        font = new BitmapFont(Gdx.files.internal("test-font.fnt"));
+        font.setColor(Color.BLACK);
+
         camera = new OrthographicCamera(Gdx.graphics.getWidth(), Gdx.graphics.
                 getHeight());
         camera.translate(camera.viewportWidth / 2, camera.viewportHeight / 2);
@@ -160,7 +168,8 @@ public class MyGdxGame extends ApplicationAdapter {
                         System.out.println("Crash!");
                         crashed = true;
                     }
-                    System.out.printf("Landed vel: %s angle: %s\n", speed.len2(), Math.toDegrees(body.getAngle()));
+                    System.out.printf("Landed vel: %s angle: %s\n", speed.len(), Math.toDegrees(body.getAngle()));
+                    System.out.println(speed.y);
                     System.out.printf("Camera moved %d\n", camera_delta_y);
                 }
             }
@@ -179,12 +188,38 @@ public class MyGdxGame extends ApplicationAdapter {
         });
     }
 
+    private float accumulator = 0;
+    private float TIME_STEP = 1/60f;
+
+    private void doPhysicsStep(float deltaTime) {
+        /*
+         fixed time step
+         max frame time to avoid spiral of death (on slow devices)
+        */
+        float frameTime = Math.min(deltaTime, 0.25f);
+        accumulator += frameTime;
+        while (accumulator >= TIME_STEP) {
+            world.step(TIME_STEP, 6, 2);
+            accumulator -= TIME_STEP;
+        }
+    }
+
+    private float normalizeZero(float f) {
+        if (Math.abs(f) < 0.03) return 0f;
+        return f;
+    }
+
+    boolean reset_angle = false;
+
+    final float ROTATION_TORQUE = 80f;
+
     @Override
     public void render() {
         float x_in_pixels = body.getPosition().x * pixels_per_meter - spriteActive.getWidth() / 2f;
         float y_in_pixels = body.getPosition().y * pixels_per_meter - spriteActive.getHeight() / 2f;
+        boolean zoom_enabled = false;
         if (y_in_pixels < Gdx.graphics.getHeight() - 400) {
-            if (camera.zoom > 0.5f) {
+            if (camera.zoom > 0.5f && zoom_enabled) {
                 camera.zoom = .5f;
                 camera.translate(0, -170);
             }
@@ -193,7 +228,9 @@ public class MyGdxGame extends ApplicationAdapter {
         // Advance the world, by the amount of time that has elapsed since the last frame
         // Generally in a real game, don't do this in the render loop, as you are tying the physics
         // update rate to the frame rate, and vice versa
-        world.step(Gdx.graphics.getDeltaTime(), 6, 2);
+        // world.step(Gdx.graphics.getDeltaTime(), 6, 2);
+
+        doPhysicsStep(Gdx.graphics.getDeltaTime());
 
         // Apply torque to the physics body.  At start this is 0 and will do nothing.
         // Torque is applied per frame instead of just once
@@ -204,37 +241,54 @@ public class MyGdxGame extends ApplicationAdapter {
         spriteNoPower.setPosition(x_in_pixels, y_in_pixels);
 
         if (Gdx.input.isKeyPressed(Input.Keys.LEFT)) {
-            torque = 80f;
+            reset_angle = false;
+            torque = ROTATION_TORQUE;
             if (spriteActive.getRotation() > 30) {
                 torque = 0f;
                 body.setAngularVelocity(0f);
             }
         } else if (Gdx.input.isKeyPressed(Input.Keys.RIGHT)) {
-            torque = -80f;
+            reset_angle = false;
+            torque = -ROTATION_TORQUE;
             if (spriteActive.getRotation() < -30) {
                 torque = 0f;
                 body.setAngularVelocity(0f);
             }
-        } else {
+        } else if (Gdx.input.isKeyPressed(Input.Keys.DOWN)) {
+            // Initiate auto-rotation
+            torque = 0f;
+            reset_angle = true;
+        } else if (!reset_angle) {
             torque = 0f;
             body.setAngularVelocity(0f);
         }
 
+        // Not working!
+        if (reset_angle) {
+            float q = -body.getAngle();
+            float c = 2f; // initial speed of rotation
+            if (Math.abs(body.getAngle()) > 0.001f) {
+                body.setAngularVelocity(c * q);
+            } else {
+                // Auto rotation finished.
+                reset_angle = false;
+                body.setAngularVelocity(0f);
+            }
+        }
         spriteWithPower.setRotation((float) Math.toDegrees(body.getAngle()));
         spriteNoPower.setRotation((float) Math.toDegrees(body.getAngle()));
 
         if (Gdx.input.isKeyPressed(Input.Keys.SPACE)) {
+            // Execute thrust.
             final float force;
             force = 30f;
             spriteActive = spriteWithPower;
             float angle = body.getAngle();
             force_y = (float) (Math.cos(angle) * force);
             force_x = (float) (-Math.sin(angle) * force);
-        } else if (Gdx.input.isKeyPressed(Input.Keys.DOWN)) {
-            camera.translate(0, -1);
-            camera_delta_y -= 1;
         } else {
             force_y = 0f;
+            force_x = 0f;
             spriteActive = spriteNoPower;
         }
 
@@ -250,6 +304,13 @@ public class MyGdxGame extends ApplicationAdapter {
         debugMatrix = batch.getProjectionMatrix().cpy().scale(pixels_per_meter, pixels_per_meter, 0);
         batch.begin();
         spriteActive.draw(batch);
+
+        font.draw(batch, "VelX: " + String.format("%.0f", normalizeZero(body.getLinearVelocity().x)) + " m/sec",
+                10, font.getLineHeight() + 5);
+        font.draw(batch, "VelY: " + String.format("%.0f", normalizeZero(body.getLinearVelocity().y)) + " m/sec",
+                10, font.getLineHeight() * 2 + 5);
+        font.draw(batch, "Angle: " + String.format("%.0f", Math.toDegrees(body.getAngle())) + " deg",
+                10, font.getLineHeight() * 3 + 5);
         batch.end();
 
         if (x_shape > Gdx.graphics.getWidth() - rect_width) {
